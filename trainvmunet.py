@@ -770,7 +770,81 @@ class VSSM(nn.Module):
         # self.avgpool = nn.AdaptiveAvgPool1d(1)
         # self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
-        self.apply(self._init_weights)
+    self.apply(self._init_weights)
+    def _init_weights(self, m: nn.Module):
+    """
+    out_proj.weight which is previously initilized in VSSBlock, would be cleared in nn.Linear
+    no fc.weight found in the any of the model parameters
+    no nn.Embedding found in the any of the model parameters
+    so the thing is, VSSBlock initialization is useless
+    
+    Conv2D is not intialized !!!
+    """
+    if isinstance(m, nn.Linear):
+        trunc_normal_(m.weight, std=.02)
+        if isinstance(m, nn.Linear) and m.bias is not None:
+            nn.init.constant_(m.bias, 0)
+    elif isinstance(m, nn.LayerNorm):
+        nn.init.constant_(m.bias, 0)
+        nn.init.constant_(m.weight, 1.0)
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {'absolute_pos_embed'}
+
+    @torch.jit.ignore
+    def no_weight_decay_keywords(self):
+        return {'relative_position_bias_table'}
+
+    def forward_features(self, x): # x [1, 3, 256, 256]
+        skip_list = []
+        x = self.patch_embed(x) # x [1, 64, 64, 96]  , dims=[96, 192, 384, 768]
+        if self.ape: # absolute position embedding vit
+            x = x + self.absolute_pos_embed
+        x = self.pos_drop(x) # 这里的drop_rate = 0
+        # 返回最下面的 x feature 和 中间的四步的 feature
+        for layer in self.layers: 
+            skip_list.append(x) # x [1, 96, 64, 64]
+            x = layer(x) # x encoder 的最终输出
+        return x, skip_list # x [1, 8, 8, 768] , len(skip_list) = 4 , skip_list[0] [1, 64, 64, 96]
+    
+    def forward_features_up(self, x, skip_list):
+        for inx, layer_up in enumerate(self.layers_up): # x [1, 8, 8, 768]
+            if inx == 0:
+                x = layer_up(x)
+            else:
+                x = layer_up(x+skip_list[-inx])
+
+        return x # [1, 64, 64, 96]
+    
+    def forward_final(self, x): # x [1, 64, 64, 96]
+        x = self.final_up(x) # x [1, 256, 256, 24]
+        x = x.permute(0,3,1,2) # x [1, 24, 256, 256]
+        x = self.final_conv(x) # x [1, 1, 256, 256]
+        return x
+
+    def forward_backbone(self, x):
+        x = self.patch_embed(x)
+        if self.ape:
+            x = x + self.absolute_pos_embed
+        x = self.pos_drop(x)
+
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+    def forward_bak(self, x):
+        x, skip_list = self.forward_features(x)  # skip_list[0] [2, 64, 64, 96]   [3]  [2, 8, 8, 768]
+        x = self.forward_features_up(x, skip_list)
+        x = self.forward_final(x)
+        
+        return x
+    # modified by sim  to sdi module
+    def forward(self, x):
+        x, skip_list = self.forward_features(x)  # skip_list[0] [2, 64, 64, 96]   [3]  [2, 8, 8, 768]        
+        return skip_list[0], skip_list[1], skip_list[2], skip_list[3]
+
+
 DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
 
 
